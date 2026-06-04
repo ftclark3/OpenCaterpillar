@@ -365,112 +365,9 @@ def addNonBondedExclusions(oa, force):
             force.addExclusion(e1, e2)
 
 
-def identify_terminal_residues(pdb_filename):
-    # identify terminal residues
-    parser = PDBParser()
-    structure = parser.get_structure('X', pdb_filename)
-    terminal_residues = {}
-    for model in structure:
-        for chain in model:
-            residues = list(chain.get_residues())
-            terminal_residues[chain.id] = (residues[0].id[1], residues[-1].id[1])
-        return terminal_residues
-
 def line_number():
     return sys._getframe(1).f_lineno
 
-def prepare_pdb(pdb_filename, chains_to_simulate, use_cis_proline=False, keepIds=False, removeHeterogens=True):
-    # for more information about PDB Fixer, see:
-    # http://htmlpreview.github.io/?https://raw.github.com/pandegroup/pdbfixer/master/Manual.html
-    # fix up input pdb
-    cleaned_pdb_filename = "%s-cleaned.pdb" % pdb_filename[:-4]
-    input_pdb_filename = "%s-openmmawsem.pdb" % pdb_filename[:-4]
-
-    fixer = PDBFixer(filename=pdb_filename)
-
-    # remove unwanted chains
-    chains = list(fixer.topology.chains())
-    chains_to_remove = [i for i, x in enumerate(chains) if x.id not in chains_to_simulate]
-    fixer.removeChains(chains_to_remove)
-    
-    #Identify Missing Residues
-    fixer.findMissingResidues()
-    fixer.missingResidues = {}
-    
-    #Replace Nonstandard Residues
-    fixer.findNonstandardResidues()
-    fixer.replaceNonstandardResidues()
-    
-    #Remove Heterogens
-    if removeHeterogens:
-        fixer.removeHeterogens(keepWater=False)
-    
-    #Add Missing Heavy Atoms
-    fixer.findMissingAtoms()
-    fixer.addMissingAtoms()
-    
-    #Add Missing Hydrogens
-    fixer.addMissingHydrogens(7.0)
-    PDBFile.writeFile(fixer.topology, fixer.positions, open(cleaned_pdb_filename, 'w'), keepIds=keepIds)
-    
-    #Read sequence
-    structure = PDBParser().get_structure('X', cleaned_pdb_filename)
-
-    # identify terminal residues
-    terminal_residues = identify_terminal_residues(cleaned_pdb_filename)
-
-    # process pdb for input into OpenMM
-    #Selects only atoms needed for the awsem topology
-    output = open(input_pdb_filename, 'w')
-    counter=0
-    for line in open(cleaned_pdb_filename):
-        # print(line)
-        splitline = line.split()
-        if len(line)>4 and line[0:4] == "ATOM":
-            try:
-                atom_index=line[6:11].strip()
-                atom_type=line[12:16].strip()
-                res_type=line[17:20].strip()
-                chain=line[21].strip()
-                res_index=line[22:26].strip()
-                x=line[30:38].strip()
-                y=line[38:46].strip()
-                z=line[46:54].strip()
-                element = line[76:78].strip()
-            except ValueError:
-                print(line)
-                raise
-        else:
-            continue
-        awsem_atoms = ["CA", "O", "CB", "C", "H", "N"]
-        if int(res_index) == terminal_residues[chain][0]:
-            awsem_atoms.remove("N")
-            awsem_atoms.remove("H")
-        if int(res_index) == terminal_residues[chain][1]:
-            awsem_atoms.remove("C")
-        # GLY should not has CB.
-        if res_type == "GLY":
-            awsem_atoms.remove("CB")
-        if atom_type in awsem_atoms:
-            line=list(line)
-            if res_type == "GLY":
-                line[17:20] = "IGL"
-            elif res_type == "PRO":
-                line[17:20] = "IPR"
-            else:
-                line[17:20] = "NGP"
-            if atom_type == "CB":
-                line[77] = "B"
-            line=''.join(line)
-            output.write(line)
-            counter+=1
-    #print("The system contains %i atoms"%counter)
-    output.close()
-
-    #Fix Virtual Site Coordinates:
-    # prepare_virtual_sites(input_pdb_filename, use_cis_proline=use_cis_proline)
-    prepare_virtual_sites_v2(input_pdb_filename, use_cis_proline=use_cis_proline)
-    return input_pdb_filename, cleaned_pdb_filename
 
 def prepare_virtual_sites_v2(pdb_file, use_cis_proline=False):
     parser = PDBParser(QUIET=True)
@@ -834,98 +731,29 @@ def download(pdb_id):
         os.rename("pdb%s.ent" % pdb_id, f"{pdb_id}.pdb")
 
 class OpenMMAWSEMSystem:
-    def __init__(self, pdb_filename, chains='A', xml_filename=xml, k_awsem=1.0, seqFromPdb=None, includeLigands=False, 
-                 periodic_box=None, fixed_residue_indices=[]):
-        # read PDB
-        self.pdb = PDBFile(str(pdb_filename))
+    def __init__(self, pdb_filename, chains='A', xml_filename=xml, k_awsem=1.0, seqFromPdb=None,
+                 includeLigands=None, # no longer used; kept for backward compatibility
+                 periodic_box=None, fixed_residue_indices=None,):
+        
+        # The main OpenMM building blocks that we initialize
+        # from files on disk are the ForceField and the Topology.
+        # The Topology is created for us by the PDBFile class.
         self.forcefield = ForceField(str(xml_filename))
+        self.pdb = PDBFile(str(pdb_filename))
+        self.topology = self.pdb.topology
+        # The ForceField and Topology together make an OpenMM System,
+        # self.system, which we will (re)initialize whenever it is accessed.
+        # When we access the self.system:
+        #     if we want to fix the positions of certain residues,
+        #     we will need to set the masses of their atoms to 0
+        if fixed_residue_indices is None:
+            self.fixed_residue_indices = []
+        else: # should be an iterable
+            self.fixed_residue_indices = fixed_residue_indices 
+        #     and we will also need the periodic box boundaries
         self.periodic_box = periodic_box 
-        self.fixed_residue_indices = fixed_residue_indices
-        if self.fixed_residue_indices:
-            self.fixed_atom_indices = []
-            for residue in self.pdb.topology.residues():
-                if residue.index in self.fixed_residue_indices:
-                    for atom in residue.atoms():
-                        self.fixed_atom_indices.append(atom.index)
-        else:
-            self.fixed_atom_indices = []
-        if not includeLigands:
-            self.system = self.forcefield.createSystem(self.pdb.topology)
-            # define convenience variables
-            self.nres = self.pdb.topology.getNumResidues()
-            self.natoms = self.pdb.topology.getNumAtoms()
-            self.residues = list(self.pdb.topology.residues())
-            self.resi = [x.residue.index for x in list(self.pdb.topology.atoms())]
-            # build lists of atoms and residue types
-            # self.atom_lists,self.res_type=build_lists_of_atoms(self.nres, self.residues)
-            self.atom_lists,self.res_type=build_lists_of_atoms_2(self.nres, self.residues, self.pdb.topology.atoms())
-        if includeLigands:
-            print(self.pdb.topology)
-            [templates, names] = self.forcefield.generateTemplatesForUnmatchedResidues(self.pdb.topology)
-            # a = templates[0]
-            for a in templates:
-                for a1 in a.atoms:
-                    # we can define the types of ligand atoms using their names.
-                    a1.type = a1.name
-                    # if a1.element.symbol == "C":
-                    #     a1.type = "CA"
-                    # else:
-                    #     a1.type = a1.element.symbol
-                    # a1.type = a1.element.symbol
-                self.forcefield.registerResidueTemplate(a)
-
-            res_list = list(self.pdb.topology.residues())
-            atom_list = list(self.pdb.topology.atoms())
-            protein_resNames = ["NGP", "IGL", "IPR"]
-            DNA_resNames = ["DA", "DC", "DT", "DG"]
-            protein_res_list = []
-            DNA_res_list = []
-            ligand_res_list = []
-            for res in res_list:
-                if res.name in protein_resNames:
-                    protein_res_list.append(res)
-                elif res.name in DNA_resNames:
-                    DNA_res_list.append(res)
-                else:
-                    ligand_res_list.append(res)
-
-            protein_atom_list = []
-            DNA_atom_list = []
-            ligand_atom_list = []
-            for atom in atom_list:
-                if atom.residue.name in protein_resNames:
-                    protein_atom_list.append(atom)
-                elif atom.residue.name in DNA_resNames:
-                    DNA_atom_list.append(atom)
-                else:
-                    ligand_atom_list.append(atom)
-            self.ligand_res_list = ligand_res_list
-            self.ligand_atom_list = ligand_atom_list
-            self.protein_atom_list = protein_atom_list
-            self.system = self.forcefield.createSystem(self.pdb.topology)
-            self.nres = len(protein_res_list)
-            self.residues = protein_res_list
-            print(f"Number of residues: {self.nres}, Number of ligands: {len(ligand_res_list)}")
-            # self.natoms = len(protein_atom_list)
-            self.natoms = self.pdb.topology.getNumAtoms()
-            self.resi = [x.residue.index if x in protein_atom_list else -1 for x in atom_list]
-            self.atom_lists,self.res_type=build_lists_of_atoms_2(self.nres, self.residues, protein_atom_list)
-        if self.periodic_box:
-            self.system.setDefaultPeriodicBoxVectors(Vec3(self.periodic_box[0],0,0),
-                                                     Vec3(0,self.periodic_box[1],0),
-                                                     Vec3(0,0,self.periodic_box[2]))
-        for atom_index in self.fixed_atom_indices:
-            self.system.setParticleMass(atom_index,0)
-
-        # print(self.atom_lists,self.res_type)
-        self.n =self.atom_lists['n']
-        self.h =self.atom_lists['h']
-        self.ca=self.atom_lists['ca']
-        self.c =self.atom_lists['c']
-        self.o =self.atom_lists['o']
-        self.cb=self.atom_lists['cb']
-
-        self.chain_starts, self.chain_ends = get_chain_starts_and_ends(self.residues)
+        
+        # TODO: elaborate on the purpose of this section
         # setup virtual sites
         # if Segmentation fault in setup_virtual_sites, use ensure_atom_order
         setup_virtual_sites(self.nres, self.system, self.n, self.h, self.ca, self.c, self.o,
@@ -933,31 +761,145 @@ class OpenMMAWSEMSystem:
         # setup bonds
         self.bonds = setup_bonds(self.nres, self.n, self.h, self.ca, self.c, self.o,
                             self.cb, self.res_type, self.chain_starts, self.chain_ends)
-        # identify terminal_residues
-        # self.terminal_residues = identify_terminal_residues(pdb_filename)
-        # set overall scaling
-        self.k_awsem = k_awsem
-        # keep track of force names for output purposes
-        self.force_names = []
-        # save seq info
-        if seqFromPdb is None:
+
+        # While many common force fields specify all their parameters in the xml file
+        # used to create the ForceField object, we prefer to add these forces later. 
+        # This relies on the attributes initialized below
+        self.k_awsem = k_awsem # global scale of all energy terms
+        self.force_names = [] # keep track of force names for output purposes
+        # Our openawsem-format pdb files use custom resnames, but 
+        # we need standard one-letter resnames to set up the forces
+        if seqFromPdb is None: 
             self.seq = getSeq(pdb_filename, chains=chains, fromPdb=True)
         else:
             self.seq = seqFromPdb
-        # elif seqFromPdb == 0:
-        #     self.seq = getSeq(pdb_filename, chains=chains, fromFasta=True)
+
+
+    # lazily set up the system given the forcefield and topology
+    @property
+    def system(self):
+        openmmsystem = self.forcefield.createSystem(self.topology)
+        # if we want to freeze the positions of certain residues,
+        # we need to set their particles' masses to 0
+        for residue in self.topology.residues():
+            if residue.index in self.fixed_residue_indices:
+                for atom in residue.atoms():
+                    openmmsystem.setParticleMass(atom_index,0)
+        if self.periodic_box:
+            openmmsystem.setDefaultPeriodicBoxVectors(
+                Vec3(self.periodic_box[0],0,0),
+                Vec3(0,self.periodic_box[1],0),
+                Vec3(0,0,self.periodic_box[2]))
+        return openmmsystem
+
+
+    # make the topology a property so we can recalculate derived
+    # attributes automatically in case it is changed
+    @property
+    def topology(self):
+        return self._topology 
+    @topology.setter
+    def topology(self, top):
+        #[templates, names] = self.forcefield.generateTemplatesForUnmatchedResidues(top)
+        ## a = templates[0]
+        #for a in templates:
+        #    for a1 in a.atoms:
+        #        # we can define the types of ligand atoms using their names.
+        #        a1.type = a1.name
+        #        # if a1.element.symbol == "C":
+        #        #     a1.type = "CA"
+        #        # else:
+        #        #     a1.type = a1.element.symbol
+        #        # a1.type = a1.element.symbol
+        #    self.forcefield.registerResidueTemplate(a)
+        self._topology = top
+        # (re)calculate attributes derived from the topology
+        res_list = list(self._topology.residues())
+        atom_list = list(self._topology.atoms())
+        protein_resNames = ["NGP", "IGL", "IPR"]
+        DNA_resNames = ["DA", "DC", "DT", "DG"]
+        protein_res_list = []
+        DNA_res_list = []
+        ligand_res_list = []
+        for res in res_list:
+            if res.name in protein_resNames:
+                protein_res_list.append(res)
+            elif res.name in DNA_resNames:
+                DNA_res_list.append(res)
+            else:
+                ligand_res_list.append(res)
+        self._residues = protein_res_list
+        protein_atom_list = []
+        DNA_atom_list = []
+        ligand_atom_list = []
+        for atom in atom_list:
+            if atom.residue.name in protein_resNames:
+                protein_atom_list.append(atom)
+            elif atom.residue.name in DNA_resNames:
+                DNA_atom_list.append(atom)
+            else:
+                ligand_atom_list.append(atom)
+        self._resi = [x.residue.index if x in protein_atom_list else -1 for x in atom_list]
+        self._atom_lists, self._res_type = build_lists_of_atoms_2(self.nres, self.residues, protein_atom_list)        
+    # make attributes derived from the topology write-protected
+    @property
+    def residues(self):
+        return self._residues
+    @property
+    def resi(self):
+        return self._resi
+    @property
+    def nres(self):
+        return len(self._residues)
+    @property
+    def natoms(self):
+        return self._topology.getNumAtoms()
+    @property
+    def atom_lists(self):
+        return self._atom_lists
+    @property 
+    def res_type(self):
+        return self._res_type
+    @property 
+    def n(self):
+        return self.atom_lists['n']
+    @property 
+    def h(self):
+        return self.atom_lists['h']
+    @property
+    def ca(self):
+        return self.atom_lists['ca']
+    @property
+    def c(self):
+        return self.atom_lists['c']
+    @property 
+    def o(self):
+        return self.atom_lists['o']
+    @property 
+    def cb(self):
+        return self.atom_lists['cb']
+    @property
+    def chain_starts(self):
+        return get_chain_starts_and_ends(self.residues)[0]
+    @property
+    def chain_ends(self):
+        return get_chain_starts_and_ends(self.residues)[1]
+
 
     def addForces(self, forces):
         for i, (force) in enumerate(forces):
             self.addForce(force)
             force.setForceGroup(i+1)
 
+
     def addForce(self, force):
         self.system.addForce(force)
+
 
     def addForcesWithDefaultForceGroup(self, forces):
         for i, (force) in enumerate(forces):
             self.addForce(force)
+
 
     def corrected_resid(self, gap=100):
         """Return per-atom residue IDs with a guaranteed gap between chains.
@@ -983,8 +925,8 @@ class OpenMMAWSEMSystem:
             resi += gap * (resi >= start)
         return resi
 
-
-
+#def OpenMMAWSEMSystem(*args, **kwargs): # allow OpenMMAWSEMSystem to be initialized in the same way as before
+#    return SystemWrapper.awsem_style(*args, **kwargs)
 
 def read_trajectory_pdb_positions(pdb_trajectory_filename):
     import uuid, os
