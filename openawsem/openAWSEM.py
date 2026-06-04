@@ -747,18 +747,18 @@ class OpenMMAWSEMSystem:
         self._pdb = PDBFile(str(pdb_filename)) # can use self.pdb.topology or self.topology
 
         # Set attributes derived from the Topology
-        #[templates, names] = self.forcefield.generateTemplatesForUnmatchedResidues(top)
-        ## a = templates[0]
-        #for a in templates:
-        #    for a1 in a.atoms:
-        #        # we can define the types of ligand atoms using their names.
-        #        a1.type = a1.name
-        #        # if a1.element.symbol == "C":
-        #        #     a1.type = "CA"
-        #        # else:
-        #        #     a1.type = a1.element.symbol
-        #        # a1.type = a1.element.symbol
-        #    self.forcefield.registerResidueTemplate(a)
+        [templates, names] = self.forcefield.generateTemplatesForUnmatchedResidues(self.topology)
+        # a = templates[0]
+        for a in templates:
+            for a1 in a.atoms:
+                # we can define the types of ligand atoms using their names.
+                a1.type = a1.name
+                # if a1.element.symbol == "C":
+                #     a1.type = "CA"
+                # else:
+                #     a1.type = a1.element.symbol
+                # a1.type = a1.element.symbol
+            self.forcefield.registerResidueTemplate(a)
         res_list = list(self.topology.residues())
         atom_list = list(self.topology.atoms())
         protein_resNames = ["NGP", "IGL", "IPR"]
