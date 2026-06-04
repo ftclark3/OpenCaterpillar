@@ -734,72 +734,19 @@ class OpenMMAWSEMSystem:
     def __init__(self, pdb_filename, chains='A', xml_filename=xml, k_awsem=1.0, seqFromPdb=None,
                  includeLigands=None, # no longer used; kept for backward compatibility
                  periodic_box=None, fixed_residue_indices=None,):
-        
+        #TODO: add docstring
+
+        # avoiding mutable default argument
+        if fixed_residue_indices is None:
+            fixed_residue_indices = []
+
         # The main OpenMM building blocks that we initialize
         # from files on disk are the ForceField and the Topology.
         # The Topology is created for us by the PDBFile class.
-        self.forcefield = ForceField(str(xml_filename))
-        self.pdb = PDBFile(str(pdb_filename))
-        self.topology = self.pdb.topology
-        # The ForceField and Topology together make an OpenMM System,
-        # self.system, which we will (re)initialize whenever it is accessed.
-        # When we access the self.system:
-        #     if we want to fix the positions of certain residues,
-        #     we will need to set the masses of their atoms to 0
-        if fixed_residue_indices is None:
-            self.fixed_residue_indices = []
-        else: # should be an iterable
-            self.fixed_residue_indices = fixed_residue_indices 
-        #     and we will also need the periodic box boundaries
-        self.periodic_box = periodic_box 
-        
-        # TODO: elaborate on the purpose of this section
-        # setup virtual sites
-        # if Segmentation fault in setup_virtual_sites, use ensure_atom_order
-        setup_virtual_sites(self.nres, self.system, self.n, self.h, self.ca, self.c, self.o,
-                            self.cb, self.res_type, self.chain_starts, self.chain_ends)
-        # setup bonds
-        self.bonds = setup_bonds(self.nres, self.n, self.h, self.ca, self.c, self.o,
-                            self.cb, self.res_type, self.chain_starts, self.chain_ends)
+        self._forcefield = ForceField(str(xml_filename))
+        self._pdb = PDBFile(str(pdb_filename)) # can use self.pdb.topology or self.topology
 
-        # While many common force fields specify all their parameters in the xml file
-        # used to create the ForceField object, we prefer to add these forces later. 
-        # This relies on the attributes initialized below
-        self.k_awsem = k_awsem # global scale of all energy terms
-        self.force_names = [] # keep track of force names for output purposes
-        # Our openawsem-format pdb files use custom resnames, but 
-        # we need standard one-letter resnames to set up the forces
-        if seqFromPdb is None: 
-            self.seq = getSeq(pdb_filename, chains=chains, fromPdb=True)
-        else:
-            self.seq = seqFromPdb
-
-
-    # lazily set up the system given the forcefield and topology
-    @property
-    def system(self):
-        openmmsystem = self.forcefield.createSystem(self.topology)
-        # if we want to freeze the positions of certain residues,
-        # we need to set their particles' masses to 0
-        for residue in self.topology.residues():
-            if residue.index in self.fixed_residue_indices:
-                for atom in residue.atoms():
-                    openmmsystem.setParticleMass(atom_index,0)
-        if self.periodic_box:
-            openmmsystem.setDefaultPeriodicBoxVectors(
-                Vec3(self.periodic_box[0],0,0),
-                Vec3(0,self.periodic_box[1],0),
-                Vec3(0,0,self.periodic_box[2]))
-        return openmmsystem
-
-
-    # make the topology a property so we can recalculate derived
-    # attributes automatically in case it is changed
-    @property
-    def topology(self):
-        return self._topology 
-    @topology.setter
-    def topology(self, top):
+        # Set attributes derived from the Topology
         #[templates, names] = self.forcefield.generateTemplatesForUnmatchedResidues(top)
         ## a = templates[0]
         #for a in templates:
@@ -812,10 +759,8 @@ class OpenMMAWSEMSystem:
         #        #     a1.type = a1.element.symbol
         #        # a1.type = a1.element.symbol
         #    self.forcefield.registerResidueTemplate(a)
-        self._topology = top
-        # (re)calculate attributes derived from the topology
-        res_list = list(self._topology.residues())
-        atom_list = list(self._topology.atoms())
+        res_list = list(self.topology.residues())
+        atom_list = list(self.topology.atoms())
         protein_resNames = ["NGP", "IGL", "IPR"]
         DNA_resNames = ["DA", "DC", "DT", "DG"]
         protein_res_list = []
@@ -840,20 +785,101 @@ class OpenMMAWSEMSystem:
             else:
                 ligand_atom_list.append(atom)
         self._resi = [x.residue.index if x in protein_atom_list else -1 for x in atom_list]
-        self._atom_lists, self._res_type = build_lists_of_atoms_2(self.nres, self.residues, protein_atom_list)        
-    # make attributes derived from the topology write-protected
+        self._atom_lists, self._res_type = build_lists_of_atoms_2(self.nres, self.residues, protein_atom_list)    
+
+        # The ForceField and Topology together make an OpenMM System
+        self.system = self.forcefield.createSystem(self.topology)
+
+        # The Topology specifies particle masses, but we can change
+        # the mass of any CA, CB, or O atom to 0 if we want its
+        # absolute coordinates to remain fixed over a simulation
+        for residue in self.topology.residues():
+            if residue.index in fixed_residue_indices:
+                for atom in residue.atoms():
+                    self.system.setParticleMass(atom_index,0)
+        self._fixed_residue_indices = fixed_residue_indices
+
+        # We also want our system to include information about periodic boundary conditions
+        self.periodic_box = periodic_box
+        
+        # TODO: elaborate on the purpose of this section
+        # setup virtual sites
+        # if Segmentation fault in setup_virtual_sites, use ensure_atom_order
+        setup_virtual_sites(self.nres, self.system, self.n, self.h, self.ca, self.c, self.o,
+                            self.cb, self.res_type, self.chain_starts, self.chain_ends)
+        # setup bonds
+        self.bonds = setup_bonds(self.nres, self.n, self.h, self.ca, self.c, self.o,
+                            self.cb, self.res_type, self.chain_starts, self.chain_ends)
+
+        # While many common force fields specify all their parameters in the xml file
+        # used to create the ForceField object, we prefer to add these forces later. 
+        # This relies on the attributes initialized below.
+        self.k_awsem = k_awsem # global scale of all energy terms
+        self.force_names = [] # keep track of force names for output purposes
+        # Our openawsem-format pdb files use custom resnames, but 
+        # we need standard one-letter resnames to set up the forces
+        if seqFromPdb is None: 
+            self.seq = getSeq(pdb_filename, chains=chains, fromPdb=True)
+        else:
+            self.seq = seqFromPdb
+
+
+    # openmm always defines default periodic box vectors,
+    # but it is the value of self._periodic_box that tells
+    # us whether we're using periodic boundary conditions,
+    # and, if so, the size of the box (see __init__ docstring)
+    @property
+    def periodic_box(self):
+        if self._periodic_box:
+            return self.system.getDefaultPeriodicBoxVectors()
+        else: 
+            return self._periodic_box
+    @periodic_box.setter
+    def periodic_box(self, xyz):
+        if xyz:
+            self.system.setDefaultPeriodicBoxVectors(
+                Vec3(xyz[0],0,0),
+                Vec3(0,xyz[1],0),
+                Vec3(0,0,xyz[2]))
+        self._periodic_box = xyz
+
+
+    # Most attributes should be read-only because,
+    # when you change the Topology or ForceField,
+    # other things, most importantly the System, 
+    # also need to be changed. You could write 
+    # setter functions, but you would then have to
+    # handle any modifications to the preexisting
+    # System that might have been made by the user,
+    # such as adding Forces or setting certain
+    # particle masses to 0 to freeze their location:
+    # should these be carried forward into the new
+    # System or not? It seems like the better
+    # option is to ask the user to reinitialize
+    # the entire class (which is very cheap)
+    # if they want to change some of these 
+    # important attributes.
+    # Converting these attributes to properties
+    # makes our intentions clear and limits
+    # accidental misuse.
+    @property 
+    def forcefield(self):
+        return self._forcefield
+    @property
+    def pdb(self):
+        return self._pdb
+    @property
+    def topology(self):
+        return self.pdb.topology 
+    @property
+    def fixed_residue_indices(self):
+        return self._fixed_residue_indices
     @property
     def residues(self):
         return self._residues
     @property
     def resi(self):
         return self._resi
-    @property
-    def nres(self):
-        return len(self._residues)
-    @property
-    def natoms(self):
-        return self._topology.getNumAtoms()
     @property
     def atom_lists(self):
         return self._atom_lists
@@ -878,6 +904,16 @@ class OpenMMAWSEMSystem:
     @property 
     def cb(self):
         return self.atom_lists['cb']
+
+
+    # A few other things are trivially derived
+    # from the above properties
+    @property
+    def nres(self):
+        return len(self.residues)
+    @property
+    def natoms(self):
+        return self.topology.getNumAtoms()
     @property
     def chain_starts(self):
         return get_chain_starts_and_ends(self.residues)[0]
