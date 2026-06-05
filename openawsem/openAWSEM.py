@@ -730,10 +730,9 @@ def download(pdb_id):
         PDBList().retrieve_pdb_file(pdb_id.lower(), pdir='.', file_format='pdb')
         os.rename("pdb%s.ent" % pdb_id, f"{pdb_id}.pdb")
 
-class OpenMMAWSEMSystem:
-    def __init__(self, pdb_filename, chains='A', xml_filename=xml, k_awsem=1.0, seqFromPdb=None,
-                 includeLigands=None, # no longer used; kept for backward compatibility
-                 periodic_box=None, fixed_residue_indices=None,):
+class OpenMMBaseSystem:
+    def __init__(self, pdb_filename, chains, xml_filename, seqFromPdb, 
+                       periodic_box, fixed_residue_indices):
         #TODO: add docstring
 
         # avoiding mutable default argument
@@ -746,50 +745,6 @@ class OpenMMAWSEMSystem:
         self._forcefield = ForceField(str(xml_filename))
         self._pdb = PDBFile(str(pdb_filename)) # can use self.pdb.topology or self.topology
 
-        # Set attributes derived from the Topology
-        [templates, names] = self.forcefield.generateTemplatesForUnmatchedResidues(self.topology)
-        # a = templates[0]
-        for a in templates:
-            for a1 in a.atoms:
-                # we can define the types of ligand atoms using their names.
-                a1.type = a1.name
-                # if a1.element.symbol == "C":
-                #     a1.type = "CA"
-                # else:
-                #     a1.type = a1.element.symbol
-                # a1.type = a1.element.symbol
-            self.forcefield.registerResidueTemplate(a)
-        res_list = list(self.topology.residues())
-        atom_list = list(self.topology.atoms())
-        protein_resNames = ["NGP", "IGL", "IPR"]
-        DNA_resNames = ["DA", "DC", "DT", "DG"]
-        protein_res_list = []
-        DNA_res_list = []
-        ligand_res_list = []
-        for res in res_list:
-            if res.name in protein_resNames:
-                protein_res_list.append(res)
-            elif res.name in DNA_resNames:
-                DNA_res_list.append(res)
-            else:
-                ligand_res_list.append(res)
-        self._residues = protein_res_list
-        protein_atom_list = []
-        DNA_atom_list = []
-        ligand_atom_list = []
-        for atom in atom_list:
-            if atom.residue.name in protein_resNames:
-                protein_atom_list.append(atom)
-            elif atom.residue.name in DNA_resNames:
-                DNA_atom_list.append(atom)
-            else:
-                ligand_atom_list.append(atom)
-        self._resi = [x.residue.index if x in protein_atom_list else -1 for x in atom_list]
-        self._atom_lists, self._res_type = build_lists_of_atoms_2(self.nres, self.residues, protein_atom_list)    
-
-        # The ForceField and Topology together make an OpenMM System
-        self.system = self.forcefield.createSystem(self.topology)
-
         # The Topology specifies particle masses, but we can change
         # the mass of any CA, CB, or O atom to 0 if we want its
         # absolute coordinates to remain fixed over a simulation
@@ -799,29 +754,17 @@ class OpenMMAWSEMSystem:
                     self.system.setParticleMass(atom_index,0)
         self._fixed_residue_indices = fixed_residue_indices
 
-        # We also want our system to include information about periodic boundary conditions
-        self.periodic_box = periodic_box
+        # The ForceField and Topology together make an OpenMM System
+        self.system = self.forcefield.createSystem(self.topology)
         
-        # TODO: elaborate on the purpose of this section
-        # setup virtual sites
-        # if Segmentation fault in setup_virtual_sites, use ensure_atom_order
-        setup_virtual_sites(self.nres, self.system, self.n, self.h, self.ca, self.c, self.o,
-                            self.cb, self.res_type, self.chain_starts, self.chain_ends)
-        # setup bonds
-        self.bonds = setup_bonds(self.nres, self.n, self.h, self.ca, self.c, self.o,
-                            self.cb, self.res_type, self.chain_starts, self.chain_ends)
+        # We want our system to include information about periodic boundary conditions
+        self.periodic_box = periodic_box
 
-        # While many common force fields specify all their parameters in the xml file
-        # used to create the ForceField object, we prefer to add these forces later. 
-        # This relies on the attributes initialized below.
-        self.k_awsem = k_awsem # global scale of all energy terms
-        self.force_names = [] # keep track of force names for output purposes
-        # Our openawsem-format pdb files use custom resnames, but 
-        # we need standard one-letter resnames to set up the forces
-        if seqFromPdb is None: 
-            self.seq = getSeq(pdb_filename, chains=chains, fromPdb=True)
-        else:
-            self.seq = seqFromPdb
+        # attributes that should be set by subclasses
+        self._residues = None
+        self._resi = None
+        self._atom_lists = None 
+        self._res_type = None
 
 
     # openmm always defines default periodic box vectors,
@@ -921,22 +864,15 @@ class OpenMMAWSEMSystem:
     def chain_ends(self):
         return get_chain_starts_and_ends(self.residues)[1]
 
-
     def addForces(self, forces):
         for i, (force) in enumerate(forces):
             self.addForce(force)
             force.setForceGroup(i+1)
-
-
     def addForce(self, force):
         self.system.addForce(force)
-
-
     def addForcesWithDefaultForceGroup(self, forces):
         for i, (force) in enumerate(forces):
             self.addForce(force)
-
-
     def corrected_resid(self, gap=100):
         """Return per-atom residue IDs with a guaranteed gap between chains.
 
