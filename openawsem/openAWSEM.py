@@ -773,10 +773,10 @@ class OpenMMBaseSystem:
     # and, if so, the size of the box (see __init__ docstring)
     @property
     def periodic_box(self):
-        if self._periodic_box:
-            return self.system.getDefaultPeriodicBoxVectors()
-        else: 
-            return self._periodic_box
+        if self._periodic_box: # whether we are using PBC
+            # refresh self._periodic_box only if we are using PBC
+            self._periodic_box = self.system.getDefaultPeriodicBoxVectors()
+        return self._periodic_box
     @periodic_box.setter
     def periodic_box(self, xyz):
         if xyz:
