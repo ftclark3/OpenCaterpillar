@@ -744,7 +744,8 @@ class OpenMMBaseSystem:
         # The Topology is created for us by the PDBFile class.
         self._forcefield = ForceField(str(xml_filename))
         self._pdb = PDBFile(str(pdb_filename)) # can use self.pdb.topology or self.topology
-
+        # deleting bonds reduces the chances of unexpected behavior and allows us to use standard 3letter res names in our -openmmawsem.pdb files
+        self._pdb.topology._bonds = [] 
         # The Topology specifies particle masses, but we can change
         # the mass of any CA, CB, or O atom to 0 if we want its
         # absolute coordinates to remain fixed over a simulation
