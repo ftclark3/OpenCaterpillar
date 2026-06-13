@@ -746,6 +746,10 @@ class OpenMMBaseSystem:
         self._pdb = PDBFile(str(pdb_filename)) # can use self.pdb.topology or self.topology
         # deleting bonds reduces the chances of unexpected behavior and allows us to use standard 3letter res names in our -openmmawsem.pdb files
         self._pdb.topology._bonds = [] 
+
+        # The ForceField and Topology together make an OpenMM System
+        self.system = self.forcefield.createSystem(self.topology)
+
         # The Topology specifies particle masses, but we can change
         # the mass of any CA, CB, or O atom to 0 if we want its
         # absolute coordinates to remain fixed over a simulation
@@ -755,8 +759,36 @@ class OpenMMBaseSystem:
                     self.system.setParticleMass(atom_index,0)
         self._fixed_residue_indices = fixed_residue_indices
 
-        # The ForceField and Topology together make an OpenMM System
-        self.system = self.forcefield.createSystem(self.topology)
+        ##################################################################
+        # WE WOULD LIKE TO INSPECT THE System THAT WE CREATED, BUT THIS
+        # IS ACTUALLY PRETTY DIFFICULT BECAUSE forcefield.getMatchingTemplates(top)
+        # WILL RAISE AN ERROR IF THE INITIAL MATCH FAILED FOR ANY OF THE RESIDUES,
+        # WHICH IS COMMON BECAUSE XML PATCHES ARE NOT APPLIED IN THE FIRST
+        # MATCHING ROUND OF self.forcefield.createSystem()
+        ## print information about the System that we've created
+        #unmatched = self.forcefield.getUnmatchedResidues(pdb.topology)
+        #if unmatched:
+        #    print(f"ALERT: {len(unmatched)} residues in the topology have no matching force field templates.")
+        #    for res in unmatched:
+        #        print(f"  - Unmatched: Residue {res.index} ({res.name})")
+        #    print(f"  * If you are reading this, the unmatched residues"
+        #           "    were fixed by an xml Patch (otherwise, "
+        #           "    self.forcefield.createSystem would have thrown a ValueError"")
+        #    "These unmatched residues may be fixed later by a Patch")
+        #    print(f"  * Debug by first checking the Topology object."
+        #           "    If that is fine, then something weird is"
+        #           "    happening with the forcefield.createSystem(self.topology)"
+        #           "    to build the System from the Topology.")
+        ## Retrieve the full list of matching templates for the topology
+        ## templates[i] corresponds to the i-th residue in pdb.topology.residues()
+        #templates = forcefield.getMatchingTemplates(pdb.topology)
+        #print("\n--- Residue to Template Mapping Report ---")
+        #for res, template in zip(pdb.topology.residues(), templates):
+        #    template_name = template.name if template else "FAILED TO MATCH"
+        #    print(f"PDB Residue {res.index} [{res.name}] -> Matched XML Template: {template_name}")
+        # WE COULD STILL ADD SOME ASSERTIONS TO CHECK THAT THE THE NUMBER OF ATOMS, etc.
+        # IN THE System IS WHAT WE EXPECT, BASED ON THE Topology
+        ######################################################################
         
         # We want our system to include information about periodic boundary conditions
         self.periodic_box = periodic_box
@@ -898,8 +930,256 @@ class OpenMMBaseSystem:
             resi += gap * (resi >= start)
         return resi
 
-#def OpenMMAWSEMSystem(*args, **kwargs): # allow OpenMMAWSEMSystem to be initialized in the same way as before
-#    return SystemWrapper.awsem_style(*args, **kwargs)
+
+class OpenMMAWSEMSystem(OpenMMBaseSystem):
+    def __init__(self, pdb_filename, chains='A', xml_filename=xml, k_awsem=1.0, seqFromPdb=None,
+                 includeLigands=None, # no longer used; kept for backward compatibility
+                 periodic_box=None, fixed_residue_indices=None,):
+        
+        super().__init__(
+            pdb_filename, chains, xml_filename, seqFromPdb, 
+            periodic_box, fixed_residue_indices)
+        
+        # AWSEM-specific initialization code
+        [templates, names] = self.forcefield.generateTemplatesForUnmatchedResidues(self.topology)
+        # a = templates[0]
+        for a in templates:
+            for a1 in a.atoms:
+                # we can define the types of ligand atoms using their names.
+                a1.type = a1.name
+                # if a1.element.symbol == "C":
+                #     a1.type = "CA"
+                # else:
+                #     a1.type = a1.element.symbol
+                # a1.type = a1.element.symbol
+            self.forcefield.registerResidueTemplate(a)
+        res_list = list(self.topology.residues())
+        atom_list = list(self.topology.atoms())
+        protein_resNames = ["NGP", "IGL", "IPR"]
+        DNA_resNames = ["DA", "DC", "DT", "DG"]
+        protein_res_list = []
+        DNA_res_list = []
+        ligand_res_list = []
+        for res in res_list:
+            if res.name in protein_resNames:
+                protein_res_list.append(res)
+            elif res.name in DNA_resNames:
+                DNA_res_list.append(res)
+            else:
+                ligand_res_list.append(res)
+        self._residues = protein_res_list
+        protein_atom_list = []
+        DNA_atom_list = []
+        ligand_atom_list = []
+        for atom in atom_list:
+            if atom.residue.name in protein_resNames:
+                protein_atom_list.append(atom)
+            elif atom.residue.name in DNA_resNames:
+                DNA_atom_list.append(atom)
+            else:
+                ligand_atom_list.append(atom)
+        self._resi = [x.residue.index if x in protein_atom_list else -1 for x in atom_list]
+        self._atom_lists, self._res_type = build_lists_of_atoms_2(self.nres, self.residues, protein_atom_list)    
+
+        # TODO: elaborate on the purpose of this section
+        # setup virtual sites
+        # if Segmentation fault in setup_virtual_sites, use ensure_atom_order
+        setup_virtual_sites(self.nres, self.system, self.n, self.h, self.ca, self.c, self.o,
+                            self.cb, self.res_type, self.chain_starts, self.chain_ends)
+        # setup bonds
+        self.bonds = setup_bonds(self.nres, self.n, self.h, self.ca, self.c, self.o,
+                            self.cb, self.res_type, self.chain_starts, self.chain_ends)
+
+        # While many common force fields specify all their parameters in the xml file
+        # used to create the ForceField object, we prefer to add these forces later. 
+        # This relies on the attributes initialized below.
+        self.k_awsem = k_awsem # global scale of all energy terms
+        self.force_names = [] # keep track of force names for output purposes
+        # Our openawsem-format pdb files use custom resnames, but 
+        # we need standard one-letter resnames to set up the forces
+        if seqFromPdb is None: 
+            self.seq = getSeq(pdb_filename, chains=chains, fromPdb=True)
+        else:
+            self.seq = seqFromPdb
+
+
+class OpenMMCaterpillarSystem(OpenMMBaseSystem):
+
+    def __init__(self, pdb_filename, chains='A', xml_filename=xml, seqFromPdb=None,
+                 periodic_box=None, fixed_residue_indices=None,):
+        
+        super().__init__(
+            pdb_filename, chains, xml_filename, seqFromPdb, 
+            periodic_box, fixed_residue_indices)
+        
+        # Caterpillar-specific initialization code
+        self._residues = list(self.topology.residues())
+        self._resi = [x.residue.index for x in list(self.topology.atoms())]
+        self._atom_lists, self._res_type = build_lists_of_atoms_2(
+            self.nres, self.residues, list(self.topology.atoms()))
+        #self.caterpillar_setup_constraints()
+        #self.caterpillar_setup_nonCA('zero')
+        self.set_holonomic_constraints()
+        self.apply_dihedral_constraints() # probably can't do holonomic
+        # Our awsem/caterpillar-format pdb files use custom resnames, but 
+        # we need standard one-letter resnames to set up the forces
+        if seqFromPdb is None: 
+            self.seq = getSeq(pdb_filename, chains=chains, fromPdb=True)
+        else:
+            self.seq = seqFromPdb   
+    
+    def set_holonomic_constraints(self):
+        d_nh = 1.0/10
+        d_nca = 1.46/10
+        d_cacb = 1.0/10
+        d_cac = 1.52/10
+        d_co = 1.23/10
+        d_cn = 1.33/10
+        pos = self.pdb.getPositions(asNumpy=True) # note that distances are in nm
+        #
+        for chain_start, chain_end in zip(self.chain_starts, self.chain_ends):
+            # chain_end is the index of the last residue in the chain 
+            # N terminus
+            if self.cb[chain_start] != -1:
+                cacb_vec = pos[self.cb[chain_start]] - pos[self.ca[chain_start]]
+                norm = np.linalg.norm(cacb_vec)
+                pos[self.cb[chain_start]] = pos[self.ca[chain_start]] + d_cacb*cacb_vec/norm
+                self.system.addConstraint(self.ca[chain_start], self.cb[chain_start], d_cacb)
+            cac_vec = pos[self.c[chain_start]] - pos[self.ca[chain_start]]
+            norm = np.linalg.norm(cac_vec)
+            pos[self.c[chain_start]] = pos[self.ca[chain_start]] + d_cac*cac_vec/norm
+            self.system.addConstraint(self.ca[chain_start], self.c[chain_start], d_cac)
+            co_vec = pos[self.o[chain_start]] - pos[self.c[chain_start]]
+            norm = np.linalg.norm(co_vec)
+            pos[self.o[chain_start]] = pos[self.c[chain_start]] + d_co*co_vec/norm
+            self.system.addConstraint(self.c[chain_start], self.o[chain_start], d_co)
+            # interior
+            for res_index in range(chain_start+1, chain_end):
+                cn_vec = pos[self.n[res_index]] - pos[self.c[res_index-1]]
+                norm = np.linalg.norm(cn_vec)
+                pos[self.n[res_index]] = pos[self.c[res_index-1]] + d_cn*cn_vec/norm
+                self.system.addConstraint(self.c[res_index-1], self.n[res_index], d_cn)
+                if self.h[res_index] != -1:
+                    nh_vec = pos[self.h[res_index]] - pos[self.n[res_index]]
+                    norm = np.linalg.norm(nh_vec)
+                    pos[self.h[res_index]] = pos[self.n[res_index]] + d_nh*nh_vec/norm
+                    self.system.addConstraint(self.n[res_index], self.h[res_index], d_nh)
+                nca_vec = pos[self.ca[res_index]] - pos[self.n[res_index]]
+                norm = np.linalg.norm(nca_vec)
+                pos[self.ca[res_index]] = pos[self.n[res_index]] + d_nca*nca_vec/norm
+                self.system.addConstraint(self.n[res_index], self.ca[res_index], d_nca)
+                if self.cb[res_index] != -1:
+                    cacb_vec = pos[self.cb[res_index]] - pos[self.ca[res_index]]
+                    norm = np.linalg.norm(cacb_vec)
+                    pos[self.cb[res_index]] = pos[self.ca[res_index]] + d_cacb*cacb_vec/norm
+                    self.system.addConstraint(self.ca[res_index], self.cb[res_index], d_cacb)
+                cac_vec = pos[self.c[res_index]] - pos[self.ca[res_index]]
+                norm = np.linalg.norm(cac_vec)
+                pos[self.c[res_index]] = pos[self.ca[res_index]] + d_cac*cacb_vec/norm
+                self.system.addConstraint(self.ca[res_index], self.c[res_index], d_cac)
+                co_vec = pos[self.o[res_index]] - pos[self.c[res_index]]
+                norm = np.linalg.norm(co_vec)
+                pos[self.o[res_index]] = pos[self.c[res_index]] + d_co*co_vec/norm
+                self.system.addConstraint(self.c[res_index], self.o[res_index], d_co)
+            # C terminus
+            cn_vec = pos[self.n[chain_end]] - pos[self.c[chain_end-1]]
+            norm = np.linalg.norm(cn_vec)
+            pos[self.n[chain_end]] = pos[self.c[chain_end-1]] + d_cn*cn_vec/norm 
+            self.system.addConstraint(self.c[chain_end-1], self.n[chain_end], d_cn)
+            if self.h[chain_end] != -1:
+                nh_vec = pos[self.h[chain_end]] - pos[self.n[chain_end]]
+                norm = np.linalg.norm(nh_vec)
+                pos[self.h[chain_end]] = pos[self.n[chain_end]] + d_nh*nh_vec/norm
+                self.system.addConstraint(self.n[chain_end], self.h[chain_end], d_nh)
+            nca_vec = pos[self.ca[chain_end]] - pos[self.n[chain_end]]
+            norm = np.linalg.norm(nca_vec)
+            pos[self.ca[chain_end]] = pos[self.n[chain_end]] + d_nca*nca_vec/norm
+            self.system.addConstraint(self.ca[chain_end], self.n[chain_end], d_nca)
+            if self.cb[chain_end]:
+                cacb_vec = pos[self.cb[chain_end]] - pos[self.ca[chain_end]]
+                norm = np.linalg.norm(cacb_vec)
+                pos[self.cb[chain_end]] = pos[self.ca[chain_end]] + d_cacb*cacb_vec/norm
+                self.system.addConstraint(self.ca[chain_end], self.cb[chain_end], d_cacb)
+            # WHAT DO WE DO WITH O AT THE CHAIN END?
+        self.pdb.positions = pos
+
+
+
+
+
+    '''
+    def caterpillar_setup_constraints(self):
+        # rigidly constraints CA-CA distances based on the distance
+        # represented in the pdb file
+        for chain_start, chain_end in zip(chain_starts, chain_ends):
+            # chain_end is the index of the last residue in the chain 
+            for res_index in range(chain_start, chain_end-1):
+                pos = self.pdb.getPositions(asNumpy=True) # note that distances are in nm
+                assert len(pos.shape) == 2
+                assert pos.shape[1] == 3
+                i1 = ca[res_index]
+                i2 = ca[res_index+1]
+                dist = np.linalg.norm(pos[i1,:]-pos[i2,:])
+                self.system.addConstraint(i1, i2, dist)
+
+    def caterpillar_setup_nonCA(self, masses):
+        if masses not in ['zero', 'xml']:
+            raise ValueError(f"unrecognized masses argument: {masses}")
+        c_weights = [-0.085, 0.745, -0.340]
+        n_weights = [0.340, 0.745, -0.085]
+        h_weights = [0.710, 0.290, 0.0, -0.260]
+        cb_weights = [-0.210, 1.420, -0.210]
+        o_weights = [0.620, 0.380, 0.0, 0.315]
+        pos = self.pdb.getPositions(asNumpy=True)
+        for chain_start, chain_end in zip(chain_starts, chain_ends):
+            # N-terminus
+            ca_i = self.ca[chain_start]
+            ca_ip1 = self.ca[chain_start+1]
+            # interior
+            for res_index in range(chain_start+1, chain_end-1):
+                ca_im1 = self.ca[res_index-1]
+                ca_i = self.ca[res_index]
+                ca_ip1 = self.ca[res_index+1]
+                self.system.setVirtualSite(self.c[res_index], 
+                    ThreeParticleAverageSite(ca_im1, ca, ca_ip1, *c_weights))
+                self.system.setVirtualSite(self.n[res_index], 
+                    ThreeParticleAverageSite(ca_im1, ca, ca_ip1, *n_weights))
+                if self.h[res_index] != -1:
+                    self.system.setVirtualSite(self.h[res_index], 
+                        OutOfPlaneSite(ca_im1, ca, ca_ip1, *h_weights))
+                if masses == 'zero':
+                    if self.cb[res_index] != -1:
+                        self.system.setVirtualSite(self.cb[res_index], 
+                            ThreeParticleAverageSite(ca_im1, ca, ca_ip1, *cb_weights))
+                    self.system.setVirtualSite(self.o[res_index], 
+                        OutOfPlaneSite(ca_im1, ca, ca_ip1, *o_weights))
+                elif masses == 'xml':
+                    if self.cb[res_index] != -1:
+                        pos[self.cb[res_index],:] = cb_weights[0]*pos[ca_im1,:] \
+                            + cb_weights[1]*pos[ca_i,:] + cb_weights[2]*pos[ca_ip1,:]
+                        d_ca_im1_cb = np.linalg.norm(pos[ca_im1,:]-pos[self.cb[res_index],:])
+                        d_ca_i_cb = np.linalg.norm(pos[ca_i,:]-pos[self.cb[res_index],:])
+                        d_ca_ip1_cb = np.linalg.norm(pos[ca_ip1,:]-pos[self.cb[res_index],:])
+                        self.system.addConstraint(ca_im1, self.cb[res_index], d_ca_im1_cb)
+                        self.system.addConstraint(ca_i, self.cb[res_index], d_ca_i_cb)
+                        self.system.addConstraint(ca_ip1, self.cb[res_index], d_ca_ip1_cb)
+                    o12 = pos[ca_i,:]-pos[ca_im1,:]
+                    o13 = pos[ca_ip1,:]-pos[ca_im1,:]
+                    pos[self.o[res_index],:] = \
+                        o_weights[0]*pos[ca_im1,:] + o_weights[1]*o12 + o_weights[2]*o13\
+                        + o_weights[3]*np.cross(o12, o13)
+                    d_ca_im1_o = np.linalg.norm(pos[ca_im1,:]-pos[self.o[res_index],:])
+                    d_ca_i_o = np.linalg.norm(pos[ca_i,:]-pos[self.o[res_index],:])
+                    d_ca_ip1_o = np.linalg.norm(pos[ca_ip1,:]-pos[self.o[res_index],:])
+                    self.system.addConstraint(ca_im1, self.o[res_index], d_ca_im1_o)
+                    self.system.addConstraint(ca_i, self.o[res_index], d_ca_i_o)
+                    self.system.addConstraint(ca_ip1, self.o[res_index], d_ca_ip1_o)
+            # C-terminus
+            ca_im1 = self.ca[chain_end-1]
+            ca_i = self.ca[chain_end]
+        '''
+
+        
 
 def read_trajectory_pdb_positions(pdb_trajectory_filename):
     import uuid, os
