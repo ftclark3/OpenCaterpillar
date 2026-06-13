@@ -2,15 +2,13 @@
 requires = ["setuptools>=61.0", "versioningit~=2.0"]
 build-backend = "setuptools.build_meta"
 
-# Self-descriptive entries which should always be present
-# https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
 [project]
-name = "openawsem"
-description = "An implementation of the AWSEM (Associative memory, Water-mediated Structure, and Energy Model) coarse-grained protein forcefield designed for use with the OpenMM simulation toolkit."
+name = "OpenCaterpillar"
+description = "An implementation of the Caterpillar coarse-grained protein forcefield designed for use with the OpenMM simulation toolkit."
 dynamic = ["version"]
 readme = "README.md"
 authors = [
-    { name = "Carlos Bueno", email = "carlos.bueno@rice.edu" }
+    { name = "Finley Clark", email = "finley.clark@rice.edu" }
 ]
 license = "MIT"
 license-files = ["LICENSE"]
@@ -19,34 +17,14 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 requires-python = ">=3.8"
-# Declare any run-time dependencies that should be installed with the package.
 dependencies = [
-    "importlib-resources;python_version<'3.10'",
-    "biopython",
-    "matplotlib",
-    "numpy",
-    "pandas",
-    "openmm",
-    "pdbfixer",
-    "mdtraj"
+    "openawsem"
 ]
 
-# Update the urls once the hosting is set up.
 [project.urls]
-Source = "https://github.com/cabb99/openawsem/"
-Documentation = "https://openawsem.readthedocs.io/"
-Homepage = "https://openawsem.org/"
-
-[project.entry-points.console_scripts]
-awsem = "openawsem.scripts.awsem:main"
-awsem_create = "openawsem.scripts.mm_create_project:main"
-awsem_run = "openawsem.scripts.mm_run:main"
-awsem_analyze = "openawsem.scripts.mm_analyze:main"
-
-[project.optional-dependencies]
-test = [
-  "pytest>=6.1.2",
-]
+Source = "https://github.com/ftclark3/OpenCaterpillar"
+Documentation = "https://github.com/ftclark3/OpenCaterpillar"
+Homepage = "https://github.com/ftclark3/OpenCaterpillar"
 
 [tool.setuptools]
 # This subkey is a beta stage development and keys may change in the future, see https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html for more details
@@ -73,12 +51,6 @@ include-package-data = false
 namespaces = false
 where = ["."]
 
-# Ref https://setuptools.pypa.io/en/latest/userguide/datafiles.html#package-data
-[tool.setuptools.package-data]
-openawsem = [
-    "py.typed"
-]
-
 [tool.versioningit]
 default-version = "1+unknown"
 
@@ -95,4 +67,4 @@ match = ["*"]
 default-tag = "1.0.0"
 
 [tool.versioningit.write]
-file = "openawsem/_version.py"
+file = "OpenCaterpillar/_version.py"

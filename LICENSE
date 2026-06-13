@@ -1,6 +1,11 @@
 MIT License
 
-Copyright (c) 2020-2025 Wei Lu, Carlos Bueno
+Copyright (c) 2026 Finley Clark
+
+This repository reuses some code from OpenAWSEM,
+https://github.com/cabb99/openawsem,
+which is available under this same license.
+OpenAWSEM Copyright (c) 2020-2025 Wei Lu, Carlos Bueno
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
