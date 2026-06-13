@@ -1028,6 +1028,7 @@ class OpenMMCaterpillarSystem(OpenMMBaseSystem):
         else:
             self.seq = seqFromPdb   
     
+    '''
     def set_holonomic_constraints(self):
         d_nh = 1.0/10
         d_nca = 1.46/10
@@ -1103,11 +1104,6 @@ class OpenMMCaterpillarSystem(OpenMMBaseSystem):
             # WHAT DO WE DO WITH O AT THE CHAIN END?
         self.pdb.positions = pos
 
-
-
-
-
-    '''
     def caterpillar_setup_constraints(self):
         # rigidly constraints CA-CA distances based on the distance
         # represented in the pdb file
@@ -1177,7 +1173,7 @@ class OpenMMCaterpillarSystem(OpenMMBaseSystem):
             # C-terminus
             ca_im1 = self.ca[chain_end-1]
             ca_i = self.ca[chain_end]
-        '''
+    '''
 
         
 
