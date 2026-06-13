@@ -1,1 +1,0 @@
-../../mm_create_project.py original_pdbs/1r69.pdb

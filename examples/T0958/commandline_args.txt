@@ -1,8 +1,0 @@
-mm_run.py t0958
-mm_run.py t0958
-mm_run.py t0958 -c A
-mm_run.py t0958 -c A
-mm_run.py t0958 -c A
-mm_run.py t0958 -c A
-mm_run.py t0958 -c A
-mm_run.py t0958 -c A

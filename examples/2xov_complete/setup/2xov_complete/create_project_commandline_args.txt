@@ -1,1 +1,0 @@
-/Users/weilu/openmmawsem/mm_create_project.py ../../cleaned_pdbs/2xov_complete.pdb --frag --hybrid
