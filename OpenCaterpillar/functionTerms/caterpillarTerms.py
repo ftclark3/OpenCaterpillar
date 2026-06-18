@@ -45,12 +45,11 @@ def caterpillar_contact_term(
     # create Force
     contact = CustomGBForce()
     contact.addTabulatedFunction("gamma_ijm", Discrete3DFunction(nwell, 20, 20, gamma_ijm.T.flatten()))
-    contact.addTabulatedFunction("burial_gamma_ij", Discrete2DFunction(20, 3, burial_gamma.T.flatten()))
-    contact.addTabulatedFunction("burial_rho_ij", Discrete1DFunction(20, burial_rho))
     contact.addPerParticleParameter("resName")
     contact.addPerParticleParameter("resId")
     contact.addPerParticleParameter("isSite")
     contact.addPerParticleParameter("chainId")
+    contact.addPerParticleParameter("e_Sol") # steepness of solvation penalty, kind of like a burial gamma
     
     # Logic that evaluates to 1 if two residues should be included in the
     # rho/omega calculation and the contact energy calculation,
@@ -59,7 +58,7 @@ def caterpillar_contact_term(
     seqsep = 'max(step(abs(resId1-resId2)-3),step(abs(chainId2-chainId1)-1))' 
     
     # tell the Force how to calculate the density/number of neighbors,
-    # called "omega" in the coluzza literature and "rho" in the wolynes literature
+    # called "Omega^i" in the coluzza literature and "rho" or "rho_i" in the wolynes literature
     contact.addComputedValue("rho", 
         f"isSite1*isSite2*{seqsep}*0.25*(1+tanh({eta}*(r-{r_min})))*(1+tanh({eta}*({r_max}-r)))", 
         CustomGBForce.ParticlePair)
@@ -86,7 +85,7 @@ def caterpillar_contact_term(
 
     # SET UP THE BURIAL FORCE
     contact.addEnergyTerm(
-        f"isSite*{k_burial}*burial_gamma_ij(resName)*max(0,{OMEGA}-rho)",
+        f"isSite*{k_burial}*max(0,e_Sol*({OMEGA}-rho))", # this is what's written in coluzza 2011, but the code might be different
          CustomGBForce.SingleParticle)
 
 
