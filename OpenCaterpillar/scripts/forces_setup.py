@@ -10,12 +10,12 @@ except ModuleNotFoundError:
     from simtk.unit import kilocalorie_per_mole
 
 # Coluzza 2011 considers several temperatures, reported as kT
-lambda coluzza_2011_hb_params kT: {
+def coluzza_2011_hb_params(kT):
+    return {
     'e_H': -3.1*kT,
     'nu': 2.0,
     'sigma': 0.2, # units of nm
-}
-
+    }
 
 def set_up_forces(cat, computeQ=False, submode=-1):
     # apply forces
