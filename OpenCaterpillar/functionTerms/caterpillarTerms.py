@@ -2,6 +2,7 @@
 from openmm.app import *
 from openmm import *
 from openmm.unit import *
+import numpy as np
 
 
 # copied from openawsem hydrogenBondTerms.py
@@ -14,6 +15,32 @@ def find_chain_index(res, chain_starts, chain_ends):
     return chain_index.index(1)
 
 
+def load_gammas(filename):
+    onebody_data = []
+    pairwise_data = []
+    with open(filename, 'r') as f:
+        previous_line_blank = True
+        for counter, line in enumerate(f):
+            if counter < 68:
+                continue # i don't know what these numbers mean, but they don't look like gammas
+            line = line.strip()
+            if line:
+                if previous_line_blank:
+                    onebody_data.append(float(line))
+                else:
+                    pairwise_data.append(float(line))
+                previous_line_blank = False 
+            else:
+                previous_line_blank = True 
+    #breakpoint()
+    #matrix21 = np.full((21,21), fill_value=np.nan)
+    #matrix21[np.triu_indices(21)] = data
+    #burial_gamma = matrix21[0,1:] # first row is burial gammas, but there are only 20, so element 0 seems not to contain any information
+    #pairwise_gamma = matrix21[1:,1:] # only main diagonal and upper triangular are filled in; np.nan on the lower triangle
+    burial_gamma  = np.array(onebody_data)
+    pairwise_gamma = np.full((20,20), fill_value=np.nan)
+    pairwise_gamma[np.triu_indices(20)] = pairwise_data
+    return burial_gamma, pairwise_gamma
 def caterpillar_contact_term(
         cat, 
         r_max = 1.2, # this is like the 'eta' that we use to calculate rho in 
@@ -22,35 +49,37 @@ def caterpillar_contact_term(
         k_contact=4.184, k_burial=4.184,
         parametersLocation=None, 
         forceGroup=22,
-        gammaName="gamma.dat", burialGammaName="burial_gamma.dat"):
+        gamma_file='aapot-pot.dat'):
     
+    burial_gamma, pairwise_gamma = load_gammas(gamma_file)
+    burial_gamma = np.zeros(burial_gamma.shape)
 
+    letter_to_index = {
+        'A':0,'C':1,'D':2,'E':3,'F':4,'G':5,
+        'H':6,'I':7,'K':8,'L':9,'M':10,'N':11,
+        'P':12,'Q':13,'R':14,'S':15,'T':16,
+        'V':17,'W':18,'Y':19} # this mapping is a consequence of ivan's gamma definitions
 
     nwell = 1
     gamma_ijm = np.zeros((nwell, 20, 20))
-
-
-    # read in gamma info-- will create mock arrays for now
-
-
-    m = 0  
-    count = 0
     for i in range(20):
-        for j in range(i, 20):
-            gamma_ijm[m][i][j] = gamma_direct[count][0]
-            gamma_ijm[m][j][i] = gamma_direct[count][0]
-            count += 1
-    
+        for j in range(i,20):
+            gamma_ijm[0,i,j] = pairwise_gamma[i,j]
+            gamma_ijm[0,j,i] = pairwise_gamma[i,j]
 
     # create Force
     contact = CustomGBForce()
     contact.addTabulatedFunction("gamma_ijm", Discrete3DFunction(nwell, 20, 20, gamma_ijm.T.flatten()))
+    contact.addTabulatedFunction("burial_gamma", Discrete1DFunction(burial_gamma))
     contact.addPerParticleParameter("resName")
     contact.addPerParticleParameter("resId")
     contact.addPerParticleParameter("isSite")
     contact.addPerParticleParameter("chainId")
-    contact.addPerParticleParameter("e_Sol") # steepness of solvation penalty, kind of like a burial gamma
-    
+
+
+    # quantities used to calculate both rho and 
+    # pairwise interaction (directly, and indirectly through its reliance on rho)
+    switching_function = f'(1/(1+exp(-25*({r_max}-r))))' 
     # Logic that evaluates to 1 if two residues should be included in the
     # rho/omega calculation and the contact energy calculation,
     # otherwise 0. This logic enforces a minimum sequence separation of 3
@@ -60,32 +89,40 @@ def caterpillar_contact_term(
     # tell the Force how to calculate the density/number of neighbors,
     # called "Omega^i" in the coluzza literature and "rho" or "rho_i" in the wolynes literature
     contact.addComputedValue("rho", 
-        f"isSite1*isSite2*{seqsep}*0.25*(1+tanh({eta}*(r-{r_min})))*(1+tanh({eta}*({r_max}-r)))", 
+        f"isSite1*isSite2*{seqsep}*{switching_function}", 
         CustomGBForce.ParticlePair)
 
     # we must add all Particles in the System to the Force, but
     # we activate isSite for one particle per residue 
     # replace cb with ca for GLY
-    cb_fixed = [x if x > 0 else y for x,y in zip(oa.cb,oa.ca)]
-    none_cb_fixed = [i for i in range(oa.natoms) if i not in cb_fixed]
-    assert len(cb_fixed) == oa.nres, f"Number of atoms in cb_fixed (non-GLY CB and GLY CA atoms), {len(cb_fixed)}, does not match number of residues {oa.nres}."
-    # print(oa.natoms, len(oa.resi), oa.resi, seq)
-    for i in range(oa.natoms):
+    cb_fixed = [x if x > 0 else y for x,y in zip(cat.cb,cat.ca)]
+    none_cb_fixed = [i for i in range(cat.natoms) if i not in cb_fixed]
+    assert len(cb_fixed) == cat.nres, f"Number of atoms in cb_fixed (non-GLY CB and GLY CA atoms), {len(cb_fixed)}, does not match number of residues {cat.nres}."
+    for i in range(cat.natoms):
+        resName = letter_to_index[cat.seq[cat.resi[i]]]
         contact.addParticle([
-            gamma_se_map_1_letter[cat.seq[cat.resi[i]]], cat.resi[i], int(i in cb_fixed), 
-            find_chain_index(cat.resi[i], cat.chain_starts, cat.chain_ends)
+            resName, # resName
+            cat.resi[i],    # resId
+            int(i in cb_fixed),  # isSite        
+            find_chain_index(cat.resi[i], cat.chain_starts, cat.chain_ends), # chainId
             ]) 
 
 
     
     # Add pairwise term
-    energy_string = f"-isSite1*isSite2*{k_contact}*gamma_ijm(1,resId1,resId2)*\
-        (1-1/(1+exp(25*({r_max}-1.2))))"
+    #     switching function goes from 0 to 1 and k_contact > 0,
+    #     but we have the leading coefficient of -1, 
+    #     so positive gammas make the overall energy negative
+    energy_string = f"-isSite1*isSite2*{k_contact}*{seqsep}*gamma_ijm(1,resName1,resName2)*{switching_function}"
     contact.addEnergyTerm(energy_string, CustomGBForce.ParticlePair)
 
-    # SET UP THE BURIAL FORCE
+    # add burial term
+    #     OMEGA-rho > 0 --> exposed
+    #     OMEGA-rho < 0 --> buried
+    #     so exposed-favoring residues should have negative gamma to penalize OMEGA-rho < 0
+    #     while buried-favoring residues should have positive gamma to penalize OMEGA-rho > 0
     contact.addEnergyTerm(
-        f"isSite*{k_burial}*max(0,e_Sol*({OMEGA}-rho))", # this is what's written in coluzza 2011, but the code might be different
+        f"isSite*{k_burial}*max(0,burial_gamma(resName)*({OMEGA}-rho))", # this is what's written in coluzza 2011, but the code might be different
          CustomGBForce.SingleParticle)
 
 
@@ -116,13 +153,13 @@ def caterpillar_hb_term(cat, e_H, nu, sigma, forceGroup):
     #
     # create Force
     hb = CustomHbondForce(
-        f"{e_H}*max(step(abs(resId2-resId1)-4),step(abs(chainId2-chainId1)-1))*\
+        f"-{e_H}*max(step(abs(resIdD-resIdA)-4),step(abs(chainIdD-chainIdA)-1))*\
             ((cos(theta1)*cos(theta2))^{nu})*(5*(div^12)-6*(div^10))\
             ;div={sigma}/distance(a2,d2);theta1=angle(a1,a2,d2);theta2=angle(d1,d2,a2)")
-    hb.addPerDonorParameter('resId')
-    hb.addPerAcceptorParameter('resId')
-    hb.addPerDonorParameter('chainID')
-    hb.addPerAcceptorParameter('chainID')
+    hb.addPerDonorParameter('resIdD')
+    hb.addPerAcceptorParameter('resIdA')
+    hb.addPerDonorParameter('chainIdD')
+    hb.addPerAcceptorParameter('chainIdA')
     # add "donors" and "acceptors" that may interact with each other
     for resindex, oneletter in enumerate(cat.seq):
         assert cat.o[resindex] != -1 # every residue should have an O
@@ -131,7 +168,7 @@ def caterpillar_hb_term(cat, e_H, nu, sigma, forceGroup):
             assert cat.h[resindex] == -1
             assert cat.c[resindex] != -1
             hb.addAcceptor(cat.c[resindex], cat.o[resindex], -1, # -1 is a placeholder for the optional 3rd particle
-                [resindex, find_chain_index(cat.chain_starts, cat.chain_ends)]) 
+                [resindex, find_chain_index(resindex, cat.chain_starts, cat.chain_ends)]) 
         elif resindex in cat.chain_ends: # residue shouldn't have a C
             assert cat.c[resindex] == -1
             assert cat.n[resindex] != -1
@@ -140,18 +177,18 @@ def caterpillar_hb_term(cat, e_H, nu, sigma, forceGroup):
             else:
                 assert cat.h[resindex] != -1
                 hb.addDonor(cat.n[resindex], cat.h[resindex], -1,
-                    [resindex, find_chain_index(cat.chain_starts, cat.chain_ends)])
+                    [resindex, find_chain_index(resindex, cat.chain_starts, cat.chain_ends)])
         else: # n and c should always be present, also h if not proline
             assert cat.c[resindex] != -1 
             assert cat.n[resindex] != -1
             hb.addAcceptor(cat.c[resindex], cat.o[resindex], -1,
-                           [resindex, find_chain_index(cat.chain_starts, cat.chain_ends)])
+                           [resindex, find_chain_index(resindex, cat.chain_starts, cat.chain_ends)])
             if oneletter == "P":
                 assert cat.h[resindex] == -1
             else:
                 assert cat.h[resindex] != -1
                 hb.addDonor(cat.n[resindex], cat.h[resindex], -1,
-                            [resindex, find_chain_index(cat.chain_starts, cat.chain_ends)]) 
+                            [resindex, find_chain_index(resindex, cat.chain_starts, cat.chain_ends)]) 
     # boilerplate
     hb.setCutoffDistance(1.0) # this potential decays pretty quickly; cutoff considers d1-a1 distance
     if cat.periodic_box:
